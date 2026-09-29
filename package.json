@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "AI-native pharmacovigilance case-processing prototype with human-in-the-loop ICH E2B(R3) review. Prototype only — not for regulatory use.",
+  "engines": {
+    "node": ">=18.17.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",

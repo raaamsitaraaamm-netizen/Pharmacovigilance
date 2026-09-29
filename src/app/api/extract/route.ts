@@ -7,26 +7,39 @@
  * Runs the AI orchestration pipeline server-side and returns the review-ready
  * PvCase plus any reviewer warnings.
  *
- * Uses AnthropicLlmClient when ANTHROPIC_API_KEY is set, otherwise falls back
- * to the deterministic MockLlmClient so the endpoint always responds.
+ * Uses a deterministic mock behind the planned Amazon Bedrock provider boundary.
  * -----------------------------------------------------------------------------
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { runPipeline } from "@/lib/pvAiPipeline";
-import { AnthropicLlmClient, MockLlmClient } from "@/lib/llm/llmClient";
+import { BedrockMockLlmClient } from "@/lib/llm/bedrockClient";
 import type { RawCase, IntakeChannel } from "@/types/pvCase";
+import { z } from "zod";
 
 export const runtime = "nodejs";
 
-function buildRawCase(body: Partial<RawCase>): RawCase {
-  if (!body.sourceText || typeof body.sourceText !== "string") {
-    throw new Error("`sourceText` is required.");
-  }
+const intakeSchema = z.object({
+  id: z.string().trim().min(1).max(100).optional(),
+  worldwideId: z.string().trim().max(100).optional(),
+  channel: z.enum([
+    "patient_email",
+    "call_center",
+    "hcp_note",
+    "literature",
+    "web_form",
+    "social_media",
+  ]).default("web_form"),
+  receivedAt: z.string().datetime().optional(),
+  sourceText: z.string().trim().min(1).max(20000),
+  subject: z.string().trim().max(120).optional(),
+}).strict();
+
+function buildRawCase(body: z.infer<typeof intakeSchema>): RawCase {
   return {
     id: body.id ?? `CASE-${Date.now()}`,
     worldwideId: body.worldwideId,
-    channel: (body.channel as IntakeChannel) ?? "web_form",
+    channel: body.channel as IntakeChannel,
     receivedAt: body.receivedAt ?? new Date().toISOString(),
     sourceText: body.sourceText,
     subject: body.subject,
@@ -34,14 +47,24 @@ function buildRawCase(body: Partial<RawCase>): RawCase {
 }
 
 export async function POST(req: NextRequest) {
+  let payload: unknown;
   try {
-    const body = (await req.json()) as Partial<RawCase>;
-    const raw = buildRawCase(body);
+    payload = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Request body must be valid JSON." }, { status: 400 });
+  }
 
-    const llm = process.env.ANTHROPIC_API_KEY
-      ? new AnthropicLlmClient()
-      : new MockLlmClient();
+  const parsed = intakeSchema.safeParse(payload);
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: "Invalid intake report.", details: parsed.error.flatten() },
+      { status: 400 }
+    );
+  }
 
+  try {
+    const raw = buildRawCase(parsed.data);
+    const llm = new BedrockMockLlmClient();
     const result = await runPipeline(raw, { llm });
 
     return NextResponse.json(
@@ -54,8 +77,8 @@ export async function POST(req: NextRequest) {
     );
   } catch (err) {
     return NextResponse.json(
-      { error: (err as Error).message },
-      { status: 400 }
+      { error: "Report extraction failed." },
+      { status: 502 }
     );
   }
 }

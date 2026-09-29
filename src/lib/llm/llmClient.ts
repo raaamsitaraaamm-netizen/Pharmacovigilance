@@ -5,10 +5,7 @@
  *
  *  - `LlmClient`         : the interface the pipeline depends on.
  *  - `MockLlmClient`     : deterministic, dependency-free extractor. Produces
- *                          schema-valid JSON so the whole app runs with zero
- *                          keys/network. Good enough to demo + unit test.
- *  - `AnthropicLlmClient`: drop-in real client (server-side only). Uses the
- *                          Messages API with a strict "JSON only" system prompt.
+ *                          schema-valid JSON for the offline demo provider.
  *
  * The pipeline never parses provider-specific shapes — it only ever receives a
  * JSON string, which it validates with Zod. That keeps swapping providers a
@@ -32,7 +29,7 @@ export interface LlmClient {
  * ===========================================================================
  * This is NOT a language model. It is a rule-based stand-in that mimics what a
  * well-prompted LLM returns: the E2B extraction JSON with per-field confidence
- * and evidence spans. Replace with AnthropicLlmClient for real inference.
+ * and evidence spans.
  * =========================================================================*/
 
 type FieldOut<T> = { value: T; confidence: number; evidence: string } | undefined;
@@ -151,6 +148,9 @@ export class MockLlmClient implements LlmClient {
       { re: /\b(short(?:ness)? of breath|breathless|difficulty breathing|trouble breathing|dyspn) /i, label: "shortness of breath" },
       { re: /\b(cough(?:ing)?)\b/i, label: "cough" },
       { re: /\b(fatigue|exhaustion|very tired|worn out|tiredness)\b/i, label: "fatigue" },
+      { re: /\b(severe\s+)?muscle pain\b/i, label: "muscle pain" },
+      { re: /\bmyalgia\b/i, label: "myalgia" },
+      { re: /\b(insomnia|difficulty sleeping|trouble sleeping)\b/i, label: "insomnia" },
       { re: /\b(fever|pyrexia|high temperature|feverish)\b/i, label: "fever" },
       { re: /\b(palpitations|racing heart|heart pounding|rapid heartbeat)\b/i, label: "palpitations" },
       { re: /\b(fainting|passed out|blacked out|syncope)\b/i, label: "fainting" },
@@ -240,58 +240,4 @@ function pruneUndefined<T>(obj: T): T {
     return out as T;
   }
   return obj;
-}
-
-/* ===========================================================================
- * AnthropicLlmClient — real inference (server-side only)
- * ===========================================================================
- * Requires ANTHROPIC_API_KEY. Never import this into a client component; the
- * key must never reach the browser. Use it inside the /api/extract route.
- * =========================================================================*/
-
-export class AnthropicLlmClient implements LlmClient {
-  readonly modelName: string;
-  private readonly apiKey: string;
-
-  constructor(opts?: { apiKey?: string; model?: string }) {
-    this.apiKey = opts?.apiKey ?? process.env.ANTHROPIC_API_KEY ?? "";
-    this.modelName = opts?.model ?? "claude-sonnet-4-6";
-    if (!this.apiKey) {
-      throw new Error("AnthropicLlmClient: ANTHROPIC_API_KEY is not set.");
-    }
-  }
-
-  async complete(req: LlmCompletionRequest): Promise<string> {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": this.apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: this.modelName,
-        max_tokens: 2000,
-        system: req.system,
-        messages: [{ role: "user", content: req.user }],
-      }),
-    });
-
-    if (!res.ok) {
-      const detail = await res.text();
-      throw new Error(`Anthropic API error ${res.status}: ${detail}`);
-    }
-
-    const data = (await res.json()) as {
-      content: { type: string; text?: string }[];
-    };
-
-    const raw = data.content
-      .map((b) => (b.type === "text" ? b.text ?? "" : ""))
-      .join("")
-      .trim();
-
-    // Strip accidental markdown fences before the pipeline parses it.
-    return raw.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-  }
 }
